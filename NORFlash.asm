@@ -10,13 +10,27 @@
 ; with other chips which use software write protection.
 ;
 ; Originally written by Mike Sutton - Bread80.com
-; Licences under the MIT licence
+; Licenced under the MIT licence
 ;
 ; The first section is some test routines which may be useful but you'll have to
 ; use the symbol table or disassembler to find the entry addresses (sorry)
 ; Change the include_test_code constant to assemble without them.
 ;
 ; Written and tested with the RASM assembler
+;
+; Routines available:
+; norflash_erase_sector - Erase a 4Kb sector
+; norflash_write_byte   - Write a single byte
+; norflash_write_sector - Write (copy to) an entire sector
+; norflash_write_bank   - Write (copy to) an entire 16kb bank
+;
+;
+; Test/sample routines available (these are NOT automated tests).
+; test_norflash_write_byte
+; test_norflash_write_string
+; test_norflash_write_sector
+; test_norflash_write_bank
+; test_norflash_write_all_sectors
 ;**********************************
 org $8000
 
@@ -26,20 +40,20 @@ include_test_code equ 1		;1= Assemble with test code. 0 = Assemble without test 
 if include_test_code
 
 ;*******************************
-;Test code: clear a sector and write a test byte.
+;Test code: erase a sector and write a test byte to it.
 ;To verify in SCM (Small Computer Monitor)
 ;o79 1 - Page ROM bank in
 ;m4000 - Memory dump. First byte should be $EA and other bytes $FF
 ;*******************************
-write_test_byte:
+test_norflash_write_byte:
 	ld d,1		;Target physical ROM bank
 	ld e,0		;Target sector within ROM bank (0..3)
-	call prog_sector_erase
+	call norflash_sector_erase
 	
 	ld hl,$0000	;Target address
 	ld d,1		;Target ROM bank
 	ld a,$ea	;Data to write
-	call prog_write_byte
+	call norflash_write_byte
 	ret
 	
 ;************************
@@ -49,45 +63,47 @@ write_test_byte:
 ;o79 1  - Page in ROM bank	
 ;m4000  - Memory dump. Data should be written in first few bytes, other bytes in sector set to $ff
 ;************************
-write_test_string:
+test_norflash_write_string:
 	ld d,1		;Physical ROM bank to write to
 	ld e,0		;Sector index within ROM bank (0..3)
-	call prog_sector_erase
+	call norflash_sector_erase
 	
 	ld hl,$000	;Target address
-	ld bc,message	;Message source address
-write_loop:
+	ld bc,norflash_message	;Message source address
+test_norflash_write_loop:
 	ld a,(bc)
 	and a
 	ret z		;Return when done
-	call prog_write_byte
+	call norflash_write_byte
 	
 	inc bc
 	inc hl
-	jr write_loop
+	jr test_norflash_write_loop
 
 	;Test string
-message: db "Hello, World!",0
+norflash_message: db "Hello, World!",0
 	nop		;To get the disassembler back on track
 
 
 ;*************	
 ;Test routine - write (copy data to) a single 4Kb sector
 ;Copy 4Kb of data pointed to by HL to the sector with index E (0..3) within ROM bank D
-test_rom_write_sector:
+;*************
+test_norflash_write_sector:
 	ld hl,$8000		;Source address
 	ld d,1			;Target physical ROM bank
 	ld e,0			;Target sector (0..3)
-	call rom_write_sector
+	call norflash_write_sector
 	ret
 	
 ;************
 ;Test routine - write (copy data to) an entire bank
 ;Copy 16Kb of data pointed at by HL to ROM bank in D ($1f)
-test_rom_write_bank:
+;************
+test_norflash_write_bank:
 	ld hl,0		;Source address
 	ld d,2		;Target physical ROM bank
-	call rom_write_bank
+	call norflash_write_bank
 	ret
 
 	
@@ -108,12 +124,12 @@ test_rom_write_bank:
 ;o79 <n> - where n is the ROM bank number ($0..$1f)
 ;m4000 - memory dump (or m5000, m6000, m7000). The first three bytes should be written and everything else $ff
 ;***********************************
-write_test_all_sectors:
+test_norflash_write_all_sectors:
 	ld d,1		;Block (start at one because block zero is our monitor!)
-write_test_loop_outer:
+test_norflash_write_bank_loop:
 	ld e,0		;Sector
-write_test_loop_inner:
-	call prog_sector_erase
+test_norflash_write_sector_loop:
+	call norflash_sector_erase
 	
 	ld a,e		;Convert sector index to an address: D bits 1..0 to HL bits 13..12
 	rlca		
@@ -125,24 +141,24 @@ write_test_loop_inner:
 	
 	ld a,d		;Write block index
 	add 'A'
-	call prog_write_byte
+	call norflash_write_byte
 	
 	ld a,e		;Write sector index
 	add '0'
 	inc hl
-	call prog_write_byte
+	call norflash_write_byte
 	
 	ld a,h		;Write high byte of address
 	inc hl
-	call prog_write_byte
+	call norflash_write_byte
 	
 	inc e		;Next sector
 	bit 2,e
-	jr z,write_test_loop_inner	;Loop if sector < 4
+	jr z,test_norflash_write_sector_loop	;Loop if sector < 4
 	
-	inc d		;Otherwise, next block
+	inc d		;Otherwise, next bank
 	bit 5,d
-	jr z,write_test_loop_outer	;Loop if sector < 32
+	jr z,test_norflash_write_bank_loop	;Loop if sector < 32
 	ret
 	
 ;End of test code	
@@ -251,8 +267,11 @@ endif
 ;
 ;******************************************
 
+;Constants and pre-calculations
 base_bank_port equ $78	;First of the four sequential port addresses
 logical_bank equ 1		;The logical bank we'll be using to address ROM
+			; !!!I haven't tested the code against other banks!!!
+			
 bank_port equ base_bank_port + logical_bank	;The port address we'll be using
 
 logical_bank_mask equ $b000		;Mask for A15 and A14 - logical bank number
@@ -261,41 +280,38 @@ logical_bank_address equ logical_bank << 14	;The logical bank as a logical addre
 
 ;Software protection override constants/command sequences.
 ;Each step needs a physical bank number, logical address within the bank and data byte
-prog_bank1 equ $5555 >> 14	;The physical bank containing our address
-prog_addr1 equ $5555 and logical_address_mask or logical_bank_address
+norflash_bank1 equ $5555 >> 14	;The physical bank containing our address
+norflash_addr1 equ $5555 and logical_address_mask or logical_bank_address
+norflash_data1 equ $aa
 
-;prog_bank1 equ 1
-;prog_addr1 equ $5555; and $3fff	;14 bit addresses! Hard coded logical banks
-prog_data1 equ $aa
+norflash_bank2 equ $2aaa >> 14
+norflash_addr2 equ $2aaa and logical_address_mask or logical_bank_address
+norflash_data2 equ $55
 
-prog_bank2 equ $2aaa >> 14
-prog_addr2 equ $2aaa and logical_address_mask or logical_bank_address
-;prog_bank2 equ 0
-;prog_addr2 equ $2aaa or $4000	;Hard code the logical bank
-prog_data2 equ $55
+norflash_bank3 equ norflash_bank1	;Address $5555 again
+norflash_addr3 equ norflash_addr1
+norflash_data3_write equ $a0	;For writing a byte
+norflash_data3_erase equ $80	;For erasing a sector
 
-prog_bank3 equ prog_bank1	;Address $5555 again
-prog_addr3 equ prog_addr1
-prog_data3_write equ $a0	;For writing a byte
-prog_data3_erase equ $80	;For erasing a sector
+norflash_bank4 equ norflash_bank1	;Address $5555 again
+norflash_addr4 equ norflash_addr1
+norflash_data4 equ $aa
 
-prog_bank4 equ prog_bank1	;Address $5555 again
-prog_addr4 equ prog_addr1
-prog_data4 equ $aa
+norflash_bank5 equ norflash_bank2	;Address $2aaa again
+norflash_addr5 equ norflash_addr2
+norflash_data5 equ $55
 
-prog_bank5 equ prog_bank2	;Address $2aaa again
-prog_addr5 equ prog_addr2
-prog_data5 equ $55
-
-prog_data6_erase equ $30	;Erase command to be sent along with the sector address
+norflash_data6_erase equ $30	;Erase command to be sent along with the sector address
 
 ;************************
 ; Sector Erase for NOR flash
 ; Sectors are 4kb in size
 ; Entry: D = Logical ROM bank to write to (0..$1f). E = index of sector within the bank (0..3)
 ; I.e. sector 0 = addresses 0..0fff, 1=1000..1fff, 2=2000..2fff, 3=3000..3fff
+;!!!!!!ANY READS FROM OR WRITES TO ROM DURING THIS PROCESS WILL ABORT THE PROCESS!!!!!
+;!!!!!!THIS INCLUDES RUNNING CODE FROM THE ROM SUCH AS A ROM BASED MONITOR!!!!!!
 ;************************
-prog_sector_erase:	
+norflash_sector_erase:	
 	push af
 	push bc
 	push hl
@@ -304,40 +320,36 @@ prog_sector_erase:
 	;Memory bank we'll be switching blocks into
 	ld c,bank_port	
 	
-	;!!!!!!DO NOT DO ANY MEMORY WRITES UNTIL PROGRAMMING IS FINISHED (all bytes sent)
-	;This includes DO NOT PUSH VALUES ON THE STACK!!!!!
-	
 	;Overcoming write protection means writing some specific bytes to specific memory addresses in a specified sequence
-
 	;Write data byte 1
-	ld e,prog_bank1		;Switch the phsical bank into the logical bank
+	ld e,norflash_bank1		;Switch the phsical bank into the logical bank
 	out (c),e
-	ld hl,prog_addr1	;Address to write to
-	ld (hl),prog_data1	;Write
+	ld hl,norflash_addr1	;Address to write to
+	ld (hl),norflash_data1	;Write
 
 	;Write data byte 2
-	ld e,prog_bank2
+	ld e,norflash_bank2
 	out (c),e
-	ld hl,prog_addr2
-	ld (hl),prog_data2
+	ld hl,norflash_addr2
+	ld (hl),norflash_data2
 	
 	;Write data byte 3
-	ld e,prog_bank3
+	ld e,norflash_bank3
 	out (c),e
-	ld hl,prog_addr3
-	ld (hl),prog_data3_erase
+	ld hl,norflash_addr3
+	ld (hl),norflash_data3_erase
 	
 	;Write data byte 4
-	ld e,prog_bank4
+	ld e,norflash_bank4
 	out (c),e
-	ld hl,prog_addr4
-	ld (hl),prog_data4
+	ld hl,norflash_addr4
+	ld (hl),norflash_data4
 	
 	;Write data byte 5
-	ld e,prog_bank5
+	ld e,norflash_bank5
 	out (c),e
-	ld hl,prog_addr5
-	ld (hl),prog_data5
+	ld hl,norflash_addr5
+	ld (hl),norflash_data5
 	;End of write protection override sequence
 
 	pop de		;Retrieve
@@ -354,20 +366,17 @@ prog_sector_erase:
 	rlca		;Move bits 1,0 to bits 5,4 (two bit sector number to address 0x(xx)..3x(xx))
 	rlca
 	rlca
-	or logical_bank << 6
-;	or $40		;Move address to memory bank 1 (addresses 4x(xx)..7x(xx))
+	or logical_bank << 6	;Map to address in logical bank
 	ld h,a		;Move to a 16-but address in HL
-	ld l,0
+				;Lowest 12 bits of address are ignored, so no need to set L
 	
-	;**** DO NOT SINGLE STEP THIS INSTRUCTION (if the monitor is in ROM) 
-	; - the ROM is not available until /after/ the busy wait loop
-	ld (hl),prog_data6_erase	;Send the sector address and protection override data byte
+	ld (hl),norflash_data6_erase	;Send the sector address and protection override data byte
 	
 	;Wait until operation completes
-prog_erase_busy_loop:
+norflash_erase_busy_loop:
 	ld a,(hl)	;Read back data
 	rlca		;Bit 7 will return a zero until done
-	jr nc,prog_erase_busy_loop
+	jr nc,norflash_erase_busy_loop
 	
 	pop hl
 	pop bc
@@ -379,64 +388,62 @@ prog_erase_busy_loop:
 ; Entry: HL = Address to write to within the 16kb bank (0 - $3FFF) - bits 15 and 14 will be ignored.
 ;        A = Byte to write. D = Logical ROM bank to write to (0..$1f)
 ; Exit: Corrupt: AF. All other registers preserved
+;!!!!!!THE SECTOR NEEDS TO HAVE BEEN ERASED BEFORE WRITING, OTHERWISE THIS CODE 
+;WILL PROBABLY LOCK UP!!!!
+;
+;!!!!!!ANY READS FROM OR WRITES TO ROM DURING THIS PROCESS WILL ABORT THE PROCESS!!!!!
+;!!!!!!THIS INCLUDES RUNNING CODE FROM THE ROM SUCH AS A ROM BASED MONITOR!!!!!!
 ;*****************************
-prog_write_byte:
-	push bc	;Preserve
+norflash_write_byte:
+	push bc		;Preserve
 	push de
-	push hl		;Push HL to preserve return value
+	push hl
 	
-	push hl		;Push HL again so we can retrieve it
 	;Memory bank we'll be switching blocks into
 	ld c,bank_port	
-
-	;!!!!!!DO NOT DO ANY MEMORY WRITES UNTIL PROGRAMMING IS FINISHED (all bytes sent)
-	;This includes DO NOT PUSH VALUES ON THE STACK!!!!!
 	
 	;Overcoming write protection means writing some specific bytes to specific memory addresses in a specified sequence
 	;Write data byte 1
-	ld e,prog_bank1	;Switch bank in
+	ld e,norflash_bank1	;Switch bank in
 	out (c),e
-	ld hl,prog_addr1	;Address to program
-	ld (hl),prog_data1	;Byte to program
+	ld hl,norflash_addr1	;Address to program
+	ld (hl),norflash_data1	;Byte to program
 
 	;Write data byte 2
-	ld e,prog_bank2
+	ld e,norflash_bank2
 	out (c),e
-	ld hl,prog_addr2
-	ld (hl),prog_data2
+	ld hl,norflash_addr2
+	ld (hl),norflash_data2
 	
 	;Write data byte 3
-	ld e,prog_bank3
+	ld e,norflash_bank3
 	out (c),e
-	ld hl,prog_addr3
-	ld (hl),prog_data3_write
+	ld hl,norflash_addr3
+	ld (hl),norflash_data3_write
 	;End of write protection override sequence
 	
-	;Write actual data
+	;Get ready to write actual data
 	out (c),d	;Switch bank in
 	
 	pop hl		;Retrieve address
+	push hl		;And preserve it again
 	ld e,a		;Preserve A
-	ld a,logical_address_mask >> 8
-;	ld a,$3f	;Mask to a 14 bit address
+	ld a,logical_address_mask >> 8	;Mask to a 14 bit address
 	and h
-	or logical_bank << 6
-;	or $40		;Map to address block $4000..$7fff - memory bank 1
+	or logical_bank << 6	;Map to address block $4000..$7fff - memory bank 1
 	ld h,a
 	ld a,e		;Retrieve data
 	
-	;**** DO NOT SINGLE STEP THIS INSTRUCTION (if the monitor is in ROM) 
-	; - the ROM is not available until /after/ the busy wait loop
 	ld (hl),a	;Write our new byte
 	
 	;Busy loop - wait for chip to finish
 	;Bit 7 will be inverted until operation is complete
 	ld b,a		;Preserve
-prog_write_busy_loop:
+norflash_write_busy_loop:
 	ld a,(hl)	;Fetch written data
 	xor b       ;XOR bit 7 - will be zero when done
 	rlca
-	jr c,prog_write_busy_loop
+	jr c,norflash_write_busy_loop
 	
 	pop hl
 	pop de
@@ -452,13 +459,13 @@ prog_write_busy_loop:
 ; Exit: HL = addr of byte after last byte copied (ie. entry HL + $1000).
 ;       All other registers preserved.
 ;*********************************
-rom_write_sector:
+norflash_write_sector:
 	push af		;Preserve
 	push bc
 	push de
 	push ix
 	
-	call prog_sector_erase	;Erase sector
+	call norflash_sector_erase	;Erase sector
 
 	push hl		;Move Source to IX
 	pop ix
@@ -477,16 +484,16 @@ rom_write_sector:
 				;BC=Counter
 				;IX=Source
 				;HL=Dest
-rom_write_sector_loop:
+norflash_write_sector_loop:
 	ld a,(ix)	;Get byte to copy
-	call prog_write_byte	;Write byte
+	call norflash_write_byte	;Write byte
 	inc ix		;Next source
 	inc hl		;Next dest
 
 	dec bc		;Dec counter
 	ld a,b		;Is it zero?
 	or c
-	jr nz,rom_write_sector_loop	;Loop if not
+	jr nz,norflash_write_sector_loop	;Loop if not
 
 	push ix		;Source back to HL
 	pop hl
@@ -499,22 +506,22 @@ rom_write_sector_loop:
 
 ;******************************
 ; Write (copy) an entire 16kb ROM bank	
-; (Simply repeats ROM_write_sector four times)
+; (Simply repeats norflash_write_sector four times)
 ; Entry: HL=Source address to start copying from. D=Target physical ROM bank (0..$1f)
 ; Exit: HL=Address one byte after the last byte read. All other registers preserved.
 ;******************************
-rom_write_bank:
+norflash_write_bank:
 	push bc	;Preserve
 	push de
 	
 	ld b,4		;Counter
 	ld e,0		;Sector
 	
-rom_write_bank_loop:
-	call rom_write_sector	;Write sector
+norflash_write_bank_loop:
+	call norflash_write_sector	;Write sector
 	
 	inc e		;Next sector
-	djnz rom_write_bank_loop
+	djnz norflash_write_bank_loop
 	
 	pop de		;Restore
 	pop bc
