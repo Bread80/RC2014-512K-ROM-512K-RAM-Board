@@ -317,6 +317,9 @@ norflash_sector_erase:
 	push hl
 	
 	push de
+	
+	di						;Protect us from interrupt calls into ROM
+	
 	;Memory bank we'll be switching blocks into
 	ld c,bank_port	
 	
@@ -378,6 +381,8 @@ norflash_erase_busy_loop:
 	rlca		;Bit 7 will return a zero until done
 	jr nc,norflash_erase_busy_loop
 	
+	ei			;Interrupts back on
+	
 	pop hl
 	pop bc
 	pop af
@@ -398,6 +403,8 @@ norflash_write_byte:
 	push bc		;Preserve
 	push de
 	push hl
+	
+	di						;Protect from interrupts calling ROM
 	
 	;Memory bank we'll be switching blocks into
 	ld c,bank_port	
@@ -444,6 +451,8 @@ norflash_write_busy_loop:
 	xor b       ;XOR bit 7 - will be zero when done
 	rlca
 	jr c,norflash_write_busy_loop
+	
+	ei			;Interrupts back on
 	
 	pop hl
 	pop de
